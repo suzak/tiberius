@@ -35,6 +35,7 @@ use std::borrow::{BorrowMut, Cow};
 use uuid::Uuid;
 
 const MAX_NVARCHAR_SIZE: usize = 1 << 30;
+const MAX_VARCHAR_SIZE: usize = 1 << 31;
 
 #[derive(Clone, Debug, PartialEq)]
 /// A container of a value that can be represented as a TDS value.
@@ -55,6 +56,8 @@ pub enum ColumnData<'a> {
     Bit(Option<bool>),
     /// A string value.
     String(Option<Cow<'a, str>>),
+    /// A non-unicode string value.
+    VarChar(Option<Cow<'a, [u8]>>),
     /// A Guid (UUID) value.
     Guid(Option<Uuid>),
     /// Binary data.
@@ -101,6 +104,12 @@ impl<'a> ColumnData<'a> {
                 "nvarchar(max)".into()
             }
             ColumnData::String(_) => "ntext(max)".into(),
+            ColumnData::VarChar(None) => "varchar(8000)".into(),
+            ColumnData::VarChar(Some(ref s)) if s.len() <= 8000 => "varchar(8000)".into(),
+            ColumnData::VarChar(Some(ref s)) if s.len() <= MAX_VARCHAR_SIZE => {
+                "varchar(max)".into()
+            }
+            ColumnData::VarChar(_) => "text(max)".into(),
             ColumnData::Guid(_) => "uniqueidentifier".into(),
             ColumnData::Binary(Some(ref b)) if b.len() <= 8000 => "varbinary(8000)".into(),
             ColumnData::Binary(_) => "varbinary(max)".into(),
@@ -472,6 +481,29 @@ impl<'a> Encode<BytesMutWithTypeInfo<'a>> for ColumnData<'a> {
                 for (i, byte) in bytes.iter().enumerate() {
                     dst[len_pos + i] = *byte;
                 }
+            }
+            (ColumnData::VarChar(Some(bytes)), None) if bytes.len() <= 8000 => {
+                dst.put_u8(VarLenType::BigVarChar as u8);
+                dst.put_u16_le(8000);
+                // Collation
+                dst.extend_from_slice(&[0u8; 5][..]);
+                dst.put_u16_le(bytes.len() as u16);
+                dst.extend(bytes.into_owned());
+            }
+            (ColumnData::VarChar(Some(bytes)), None) => {
+                dst.put_u8(VarLenType::BigVarChar as u8);
+                // Max length
+                dst.put_u16_le(0xffff_u16);
+                // Collation
+                dst.extend_from_slice(&[0u8; 5][..]);
+                // Also the length is unknown
+                dst.put_u64_le(0xfffffffffffffffe_u64);
+                // We'll write in one chunk, length is the whole bytes length
+                dst.put_u32_le(bytes.len() as u32);
+                // Payload
+                dst.extend(bytes.into_owned());
+                // PLP_TERMINATOR
+                dst.put_u32_le(0);
             }
             (ColumnData::Binary(opt), Some(TypeInfo::VarLenSized(vlc)))
                 if vlc.r#type() == VarLenType::BigBinary
