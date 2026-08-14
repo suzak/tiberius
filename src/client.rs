@@ -251,6 +251,19 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Client<S> {
         Ok(result)
     }
 
+    /// Requests a connection reset (`sp_reset_connection`) to be performed
+    /// before the next command executed on this client.
+    ///
+    /// The reset is carried by the TDS `RESETCONNECTION` bit on the first
+    /// packet of the next request, so it costs no extra round trip. The server
+    /// rolls back any open transaction and resets session state (temporary
+    /// tables, `SET` options, session context) to the state established at
+    /// login. Connection pools should call this when recycling a connection so
+    /// that state cannot leak from one user of the connection to the next.
+    pub fn reset_connection_on_next_request(&mut self) {
+        self.connection.request_reset();
+    }
+
     /// Execute a `BULK INSERT` statement, efficiantly storing a large number of
     /// rows to a specified table. Note: make sure the input row follows the same
     /// schema as the table, otherwise calling `send()` will return an error.

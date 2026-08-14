@@ -57,6 +57,7 @@ where
     flushed: bool,
     context: Context,
     buf: BytesMut,
+    reset_pending: bool,
 }
 
 impl<S: AsyncRead + AsyncWrite + Unpin + Send> Debug for Connection<S> {
@@ -86,6 +87,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             context,
             flushed: false,
             buf: BytesMut::new(),
+            reset_pending: false,
         };
 
         let fed_auth_required = matches!(config.auth, AuthMethod::AADToken(_));
@@ -155,6 +157,12 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self
     }
 
+    /// Arranges for the server to reset the connection (`sp_reset_connection`)
+    /// before executing the next request sent on this connection.
+    pub fn request_reset(&mut self) {
+        self.reset_pending = true;
+    }
+
     /// Send an item to the wire. Header should define the item type and item should implement
     /// [`Encode`], defining the byte structure for the wire.
     ///
@@ -169,6 +177,11 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
         self.flushed = false;
         let packet_size = (self.context.packet_size() as usize) - HEADER_BYTES;
 
+        // RESETCONNECTION is carried by the first packet of the next request
+        // [2.2.3.1.2]; take the flag so it applies to this request only.
+        let reset = std::mem::take(&mut self.reset_pending);
+        let mut first = true;
+
         let mut payload = BytesMut::new();
         item.encode(&mut payload)?;
 
@@ -176,11 +189,16 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
             let writable = cmp::min(payload.len(), packet_size);
             let split_payload = payload.split_to(writable);
 
-            if payload.is_empty() {
-                header.set_status(PacketStatus::EndOfMessage);
-            } else {
-                header.set_status(PacketStatus::NormalMessage);
-            }
+            // The status field is a bit field in TDS terms, but PacketStatus
+            // models it as an enum of pre-OR'd values (like IgnoreEvent = 3),
+            // so the reset + end-of-message combination is its own variant.
+            header.set_status(match (payload.is_empty(), first && reset) {
+                (true, true) => PacketStatus::ResetConnectionEndOfMessage,
+                (true, false) => PacketStatus::EndOfMessage,
+                (false, true) => PacketStatus::ResetConnection,
+                (false, false) => PacketStatus::NormalMessage,
+            });
+            first = false;
 
             event!(
                 Level::TRACE,
@@ -466,6 +484,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin + Send> Connection<S> {
                 context,
                 flushed: false,
                 buf: BytesMut::new(),
+                reset_pending: false,
             })
         } else {
             event!(

@@ -33,6 +33,9 @@ uint_enum! {
         IgnoreEvent = 3,
         /// [client to server ONLY] [>= TDSv7.1]
         ResetConnection = 0x08,
+        /// [client to server ONLY] [>= TDSv7.1] (ResetConnection | EndOfMessage,
+        /// for a reset carried by a single-packet request)
+        ResetConnectionEndOfMessage = 0x09,
         /// [client to server ONLY] [>= TDSv7.3]
         ResetConnectionSkipTran = 0x10,
     }
