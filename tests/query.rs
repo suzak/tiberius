@@ -3037,3 +3037,60 @@ where
 
     Ok(())
 }
+
+#[test_on_runtimes]
+async fn reset_connection_on_next_request_resets_session_state<S>(
+    mut conn: tiberius::Client<S>,
+) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let initial_db: String = {
+        let row = conn
+            .simple_query("SELECT db_name()")
+            .await?
+            .into_row()
+            .await?
+            .unwrap();
+        row.get::<&str, _>(0).unwrap().to_owned()
+    };
+
+    // Poison the session: an open transaction and a temp table.
+    conn.simple_query("BEGIN TRAN")
+        .await?
+        .into_results()
+        .await?;
+    conn.simple_query("CREATE TABLE #reset_probe (x INT)")
+        .await?
+        .into_results()
+        .await?;
+
+    let row = conn
+        .simple_query("SELECT @@trancount, object_id('tempdb..#reset_probe')")
+        .await?
+        .into_row()
+        .await?
+        .unwrap();
+    assert_eq!(Some(1i32), row.get(0));
+    assert!(row.get::<i32, _>(1).is_some());
+
+    // The reset rides the next request.
+    conn.reset_connection_on_next_request();
+    conn.simple_query("SELECT 1").await?.into_results().await?;
+
+    let row = conn
+        .simple_query("SELECT @@trancount, object_id('tempdb..#reset_probe'), db_name()")
+        .await?
+        .into_row()
+        .await?
+        .unwrap();
+    assert_eq!(Some(0i32), row.get(0), "transaction should be rolled back");
+    assert_eq!(None, row.get::<i32, _>(1), "temp table should be gone");
+    assert_eq!(
+        Some(initial_db.as_str()),
+        row.get(2),
+        "database context should survive the reset"
+    );
+
+    Ok(())
+}
